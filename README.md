@@ -1,34 +1,66 @@
-# Paste Image to File Explorer
+﻿# Paste Image to File Explorer
 
-让截图或其他复制到 Windows 剪贴板中的图片，可以直接在资源管理器中按 `Ctrl+V` 粘贴为 PNG 文件。
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
+[![PowerShell](https://img.shields.io/badge/Language-PowerShell-5391FE.svg)](https://learn.microsoft.com/powershell)
+[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/LHStudio/paste-image-to-file-explorer/pulls)
+[![Maintained](https://img.shields.io/badge/Maintained-YES-2ea44f.svg)](https://github.com/LHStudio/paste-image-to-file-explorer)
 
-## 它解决什么问题？
+**English | [简体中文](README.zh-CN.md)**
 
-截图工具通常复制的是 `Bitmap`、`PNG` 等图片数据；这些数据可以粘贴到聊天框、文档或图片编辑器，但资源管理器只接受“文件列表”，所以无法把图片直接粘贴进文件夹。
+A lightweight Windows background tool that lets you paste screenshots directly into **File Explorer** with `Ctrl+V` as PNG files.
 
-本工具在后台监听剪贴板：当检测到图片时，自动写入临时缓存，并将剪贴板转换为资源管理器可识别的文件格式。之后只需在目标文件夹按 `Ctrl+V`。
+> ⚠️ **Disclaimer**: This tool is provided for learning and personal use. Use it responsibly.
 
-## 使用方法
+---
 
-1. 下载或克隆本仓库。
-2. 双击 `outputs/Start-PasteImageToExplorer.vbs` 启动后台助手。
-3. 用 Snipaste、Windows 截图工具或任意截图工具复制图片。
-4. 打开目标文件夹，按 `Ctrl+V`。
+## ✨ Features
 
-图片会作为 PNG 创建在目标文件夹中。中间文件保存在 `%TEMP%\ExplorerClipboardImages`，工具会自动清理一天前的缓存。
+- 📋 **Clipboard image → file** — automatically converts clipboard images into files File Explorer understands
+- 📁 **Paste as PNG anywhere** — press `Ctrl+V` in any folder to save the screenshot as a `.png` file
+- 🖼️ **Works with any screenshot tool** — Snipaste, Windows Snipping Tool, PrintScreen, etc.
+- 🔄 **Background monitoring** — watches the clipboard every 250 ms, no window or console
+- 🗑️ **Auto cleanup** — removes cached images older than 1 day
+- 🖥️ **System tray** — small tray icon with an **Exit** menu item
 
-## 注意事项
+## 🎯 What Problem Does It Solve?
 
-- 工具运行期间，复制图片后约 0.25 秒会将剪贴板改为“文件”格式。若你要把原始位图直接粘贴到聊天框或绘图软件，请先粘贴，再重新复制截图。
-- 程序显示在 Windows 通知区域。右键图标并选择 **Exit** 可停止它。
-- 重启 Windows 后需要再次运行启动器；可将该 `.vbs` 文件的快捷方式放进“启动”文件夹，实现登录后自动启动。
+Screenshot tools usually copy **image data** (bitmap/PNG) to the clipboard. You can paste that into chat boxes, documents, or image editors — but **File Explorer only accepts file lists**, so pasting an image directly into a folder doesn't work.
 
-## 文件说明
+This tool bridges the gap: it monitors the clipboard in the background, saves detected images to a temporary cache, and rewrites the clipboard into the **file drop format** that File Explorer recognizes. After that, just press `Ctrl+V` in the target folder.
 
-- `outputs/PasteImageToExplorer.ps1`：后台监听与图片转换逻辑。
-- `outputs/Start-PasteImageToExplorer.vbs`：无控制台窗口的启动器。
+## 🚀 Getting Started
 
-## 适用环境
+1. Download or clone this repository.
+2. Double-click `outputs/Start-PasteImageToExplorer.vbs` to launch the background helper (no console window).
+3. Copy an image with Snipaste, Windows Snipping Tool, or any screenshot tool.
+4. Open the target folder and press `Ctrl+V`.
+
+The image is saved as a PNG file in the target folder. Intermediate files live in `%TEMP%\ExplorerClipboardImages` and are auto-cleaned after one day.
+
+## 🔧 Usage Notes
+
+- While the tool is running, about **0.25 s** after copying an image the clipboard changes to the *file* format. If you want to paste the raw bitmap into a chat box or drawing app, paste it **first**, then re-copy the screenshot.
+- The program sits in the **system tray**. Right-click the icon and choose **Exit** to stop it.
+- After restarting Windows, run the launcher again. You can place a shortcut to the `.vbs` file in the **Startup** folder for auto-start at login.
+
+## 📁 Files
+
+| File | Description |
+|------|-------------|
+| `outputs/PasteImageToExplorer.ps1` | Background clipboard monitoring & image conversion logic |
+| `outputs/Start-PasteImageToExplorer.vbs` | Console-free launcher |
+
+## 💻 Requirements
 
 - Windows 10 / Windows 11
-- Windows PowerShell 5.1（系统内置）
+- Windows PowerShell 5.1 (built into Windows)
+
+## 🔒 Privacy
+
+- Everything runs **locally** — no network access, no data leaves your machine.
+- Temporary images are stored only in your local temp folder and deleted automatically.
+
+## 📝 License
+
+Released under the [MIT License](LICENSE).
