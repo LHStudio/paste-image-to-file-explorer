@@ -1,66 +1,89 @@
-﻿# Paste Image to File Explorer
+# 剪贴板贴图（PasteImageToExplorer）
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
-[![PowerShell](https://img.shields.io/badge/Language-PowerShell-5391FE.svg)](https://learn.microsoft.com/powershell)
-[![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen.svg)](https://github.com/LHStudio/paste-image-to-file-explorer/pulls)
-[![Maintained](https://img.shields.io/badge/Maintained-YES-2ea44f.svg)](https://github.com/LHStudio/paste-image-to-file-explorer)
+> 作者：**LHStudio** ｜ 版本：v1.0 ｜ 平台：Windows 10 / 11 ｜ 无需安装任何运行时
 
-**English | [简体中文](README.zh-CN.md)**
+## 简介
 
-A lightweight Windows background tool that lets you paste screenshots directly into **File Explorer** with `Ctrl+V` as PNG files.
+一个常驻系统托盘的小工具：**截图或复制图片后，在资源管理器（或桌面）里按 `Ctrl+V`，直接粘贴成一个 PNG 图片文件**。
 
-> ⚠️ **Disclaimer**: This tool is provided for learning and personal use. Use it responsibly.
+Windows 原生不支持把剪贴板里的图像粘贴成文件——截图后必须先打开画图等软件另存为。本工具自动监听剪贴板，把你截的图保存为 PNG 文件并写回剪贴板，从此「截图 → 切到文件夹 → Ctrl+V」两步搞定。
 
----
+同时，图像本身仍保留在剪贴板中，粘贴到微信/QQ 聊天窗口、Word 文档等场合依旧正常（可在菜单中关闭）。
 
-## ✨ Features
+## 使用方法
 
-- 📋 **Clipboard image → file** — automatically converts clipboard images into files File Explorer understands
-- 📁 **Paste as PNG anywhere** — press `Ctrl+V` in any folder to save the screenshot as a `.png` file
-- 🖼️ **Works with any screenshot tool** — Snipaste, Windows Snipping Tool, PrintScreen, etc.
-- 🔄 **Background monitoring** — watches the clipboard every 250 ms, no window or console
-- 🗑️ **Auto cleanup** — removes cached images older than 1 day
-- 🖥️ **System tray** — small tray icon with an **Exit** menu item
+1. 双击 `PasteImageToExplorer.exe`，程序最小化到任务栏通知区域（右下角托盘）。
+2. 用任意方式截图（`Win + Shift + S`、Snipaste、微信截图等）或复制图片。
+3. 打开资源管理器或桌面，按 `Ctrl+V` —— 图片直接保存为 `Screenshot-日期-时间.png`。
 
-## 🎯 What Problem Does It Solve?
+> 提示：建议在托盘菜单中勾选「**开机自动启动**」，以后无需手动运行。
 
-Screenshot tools usually copy **image data** (bitmap/PNG) to the clipboard. You can paste that into chat boxes, documents, or image editors — but **File Explorer only accepts file lists**, so pasting an image directly into a folder doesn't work.
+## 功能特性
 
-This tool bridges the gap: it monitors the clipboard in the background, saves detected images to a temporary cache, and rewrites the clipboard into the **file drop format** that File Explorer recognizes. After that, just press `Ctrl+V` in the target folder.
+- **事件驱动监听**：基于系统剪贴板通知，CPU 占用几乎为零，不与其他程序抢占剪贴板
+- **透明通道零损失**：优先读取剪贴板 PNG 原始数据，半透明截图不会变成黑底
+- **图像保留**：转换为文件的同时保留原图像，聊天窗口、文档仍可正常粘贴
+- **智能跳过**：复制文件（如在资源管理器中 Ctrl+C 图片文件）不会误触发转换
+- **占用重试**：剪贴板被截图软件短暂锁定时自动重试（最长约 20 秒）
+- **缓存自动管理**：文件保留 24 小时、上限 200 个，超出自动删除最旧的
+- **单实例保护**：重复启动会提示，不会出现两个进程互相干扰
+- **错误日志**：意外错误记录到 `%APPDATA%\PasteImageToExplorer\error.log`，程序不静默崩溃
 
-## 🚀 Getting Started
+## 托盘菜单
 
-1. Download or clone this repository.
-2. Double-click `outputs/Start-PasteImageToExplorer.vbs` to launch the background helper (no console window).
-3. Copy an image with Snipaste, Windows Snipping Tool, or any screenshot tool.
-4. Open the target folder and press `Ctrl+V`.
+右键点击托盘图标：
 
-The image is saved as a PNG file in the target folder. Intermediate files live in `%TEMP%\ExplorerClipboardImages` and are auto-cleaned after one day.
+| 菜单项 | 说明 |
+|---|---|
+| 启用剪贴板监控 | 暂停 / 恢复自动转换 |
+| 转换后在剪贴板保留图像 | 关闭后剪贴板只保留文件列表（行为同旧版脚本） |
+| 显示转换通知 | 每次转换弹气泡提示文件名 |
+| 开机自动启动 | 写入当前用户注册表，随 Windows 启动 |
+| 立即转换当前剪贴板图像 | 暂停监控时手动转换一次 |
+| 打开缓存文件夹 | 查看 / 取用已生成的图片（双击托盘图标同样有效） |
+| 清理缓存文件 | 删除全部缓存（保留剪贴板当前引用的文件） |
+| 关于 | 版本与作者信息 |
 
-## 🔧 Usage Notes
+## 缓存与隐私
 
-- While the tool is running, about **0.25 s** after copying an image the clipboard changes to the *file* format. If you want to paste the raw bitmap into a chat box or drawing app, paste it **first**, then re-copy the screenshot.
-- The program sits in the **system tray**. Right-click the icon and choose **Exit** to stop it.
-- After restarting Windows, run the launcher again. You can place a shortcut to the `.vbs` file in the **Startup** folder for auto-start at login.
+- 缓存目录：`%TEMP%\ExplorerClipboardImages`（即 `C:\Users\<用户名>\AppData\Local\Temp\ExplorerClipboardImages`）
+- 粘贴到资源管理器时，文件会**复制**到目标文件夹，缓存中的原件按上述规则自动清理
+- 程序完全本地运行，不联网、不上传任何数据
 
-## 📁 Files
+## 常见问题
 
-| File | Description |
-|------|-------------|
-| `outputs/PasteImageToExplorer.ps1` | Background clipboard monitoring & image conversion logic |
-| `outputs/Start-PasteImageToExplorer.vbs` | Console-free launcher |
+**Q：粘贴到聊天窗口还是图片？**
+设计如此——文件列表和图像同时保留在剪贴板。资源管理器粘贴得到文件，聊天窗口粘贴得到图片。若只想保留文件，关闭菜单中的「转换后在剪贴板保留图像」。
 
-## 💻 Requirements
+**Q：安全软件提示风险？**
+本程序由本机源码直接编译、无数字签名，个别安全软件可能误报，添加信任即可。
 
-- Windows 10 / Windows 11
-- Windows PowerShell 5.1 (built into Windows)
+**Q：拷到别的电脑能用吗？**
+可以。程序基于 Windows 10/11 自带的 .NET Framework，单个 exe 文件直接复制即可运行。
 
-## 🔒 Privacy
+## 从源码构建
 
-- Everything runs **locally** — no network access, no data leaves your machine.
-- Temporary images are stored only in your local temp folder and deleted automatically.
+程序仅一个主源文件，使用 Windows 自带的 .NET Framework 编译器，**不需要安装 Visual Studio 或 SDK**：
 
-## 📝 License
+```
+build.cmd          ← 双击即可重新编译
+PasteImageToExplorer.exe
+src/
+  ├─ Program.cs         主程序源码（C# WinForms）
+  ├─ MakeIcon.cs        程序图标生成器
+  ├─ app.ico            生成的多尺寸图标
+  ├─ app.manifest       DPI 感知等清单
+  └─ test_clipboard.ps1 端到端测试脚本
+```
 
-Released under the [MIT License](LICENSE).
+运行测试（需先启动程序）：
+
+```
+powershell -NoProfile -STA -ExecutionPolicy Bypass -File src\test_clipboard.ps1
+```
+
+## 版权
+
+Copyright (C) LHStudio 2026
+
+程序可自由使用与修改，转载或二次分发时请保留作者信息。
