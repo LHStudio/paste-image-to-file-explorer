@@ -1,3 +1,7 @@
+# v1.1 更新
+
+默认 Alt+C 手动转换，可在托盘「设置」自定义；自动转换重试、漏通知兜底和缓存保护已改进。详见 [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)。
+
 # 剪贴板贴图（PasteImageToExplorer）
 
 > 作者：**LHStudio** ｜ 版本：v1.0 ｜ 平台：Windows 10 / 11 ｜ 无需安装任何运行时
