@@ -27,9 +27,9 @@ using Microsoft.Win32;
 [assembly: AssemblyCompany("LHStudio")]
 [assembly: AssemblyCopyright("Copyright (C) LHStudio 2026")]
 [assembly: AssemblyTrademark("LHStudio")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-[assembly: AssemblyInformationalVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyInformationalVersion("1.1.0")]
 
 namespace PasteImageToExplorer
 {
@@ -94,6 +94,7 @@ namespace PasteImageToExplorer
         private const int WM_CLIPBOARDUPDATE = 0x031D;
 
         internal event EventHandler ClipboardUpdate;
+        internal event EventHandler HotkeyPressed;
 
         internal ClipboardListenerWindow()
         {
@@ -107,6 +108,11 @@ namespace PasteImageToExplorer
             if (m.Msg == WM_CLIPBOARDUPDATE)
             {
                 EventHandler handler = ClipboardUpdate;
+                if (handler != null) handler(this, EventArgs.Empty);
+            }
+            else if (m.Msg == 0x0312)
+            {
+                EventHandler handler = HotkeyPressed;
                 if (handler != null) handler(this, EventArgs.Empty);
             }
             base.WndProc(ref m);
@@ -132,6 +138,11 @@ namespace PasteImageToExplorer
         [DllImport("user32.dll")]
         private static extern uint GetClipboardSequenceNumber();
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
+        [DllImport("user32.dll")]
+        private static extern bool UnregisterHotKey(IntPtr hwnd, int id);
+
         private readonly string cacheDir;
         private readonly string settingsFile;
 
@@ -140,7 +151,7 @@ namespace PasteImageToExplorer
         private ClipboardListenerWindow listener;
         private Timer retryTimer;
         private Timer cleanupTimer;
-        private Timer pollTimer;      // 仅当系统拒绝事件监听注册时启用
+        private Timer pollTimer;      // 序号兜底，不读取未变化的剪贴板
 
         private ToolStripMenuItem itemMonitor;
         private ToolStripMenuItem itemKeepImage;
@@ -150,10 +161,19 @@ namespace PasteImageToExplorer
         private bool monitorEnabled = true;
         private bool keepImageOnClipboard = true;
         private bool showNotifications = true;
+        private bool hotkeyEnabled = true;
+        private string hotkeyText = "Alt+C";
+        private int registeredHotkeyId;
+        private string hotkeyStatus = "";
+        private Form settingsForm;
+        private string lastStatus = "等待剪贴板图像";
 
         private bool settingClipboard;   // 正在由本程序写入剪贴板
         private uint lastSetSeq;         // 本程序上次写入剪贴板后的序号
         private uint lastPolledSeq;
+        private uint lastHandledSeq;
+        private uint pendingSeq;
+        private bool pendingManual;
         private int retryCount;
         private int convertedCount;
         private bool disposed;
@@ -175,26 +195,18 @@ namespace PasteImageToExplorer
             BuildMenu();
             BuildTrayIcon(firstRun);
 
-            listener = new ClipboardListenerWindow();
-            listener.ClipboardUpdate += delegate(object s, EventArgs e) { OnClipboardUpdateCore(); };
-            if (!AddClipboardFormatListener(listener.Handle))
-            {
-                Program.Log("初始化", new Exception("AddClipboardFormatListener 失败，改用轮询模式。"));
-                pollTimer = new Timer();
-                pollTimer.Interval = 250;
-                pollTimer.Tick += delegate
-                {
-                    uint seq = GetClipboardSequenceNumber();
-                    if (seq == 0 || seq == lastPolledSeq) return;
-                    lastPolledSeq = seq;
-                    OnClipboardUpdateCore();
-                };
-                pollTimer.Start();
-            }
-
             retryTimer = new Timer();
             retryTimer.Interval = RetryIntervalMs;
             retryTimer.Tick += delegate { OnRetryTick(); };
+
+            listener = new ClipboardListenerWindow();
+            listener.ClipboardUpdate += delegate(object s, EventArgs e) { OnClipboardUpdateCore(); };
+            listener.HotkeyPressed += delegate { ProcessClipboardNow(true); };
+            if (!AddClipboardFormatListener(listener.Handle))
+                Program.Log("初始化", new Exception("事件监听注册失败，使用序号兜底。"));
+            StartWatchdog();
+            if (!ApplyHotkey(hotkeyEnabled, hotkeyText))
+                trayIcon.ShowBalloonTip(3000, Program.AppTitle, hotkeyStatus + " 请在设置中更换快捷键。", ToolTipIcon.Warning);
 
             cleanupTimer = new Timer();
             cleanupTimer.Interval = 60 * 60 * 1000;   // 每小时清理一次过期缓存
@@ -203,6 +215,23 @@ namespace PasteImageToExplorer
 
             // 启动时若剪贴板中已有图像（启动前刚截的图），也转换一次
             if (monitorEnabled) ProcessClipboardNow(false);
+            UpdateTooltip();
+        }
+
+        private void StartWatchdog()
+        {
+            if (pollTimer != null) pollTimer.Dispose();
+            lastPolledSeq = GetClipboardSequenceNumber();
+            pollTimer = new Timer();
+            pollTimer.Interval = 750;
+            pollTimer.Tick += delegate
+            {
+                uint seq = GetClipboardSequenceNumber();
+                if (seq == 0 || seq == lastPolledSeq) return;
+                lastPolledSeq = seq;
+                OnClipboardUpdateCore();
+            };
+            pollTimer.Start();
         }
 
         // ---------------- 剪贴板处理 ----------------
@@ -212,51 +241,69 @@ namespace PasteImageToExplorer
             if (settingClipboard) return;                 // 忽略自己写入剪贴板触发的更新
             if (!monitorEnabled) return;
             uint seq = GetClipboardSequenceNumber();
-            if (seq != 0 && seq == lastSetSeq) return;
+            if (seq != 0 && (seq == lastSetSeq || seq == lastHandledSeq)) return;
+            if (seq == pendingSeq && retryTimer.Enabled) return;
+            if (seq != pendingSeq) { retryCount = 0; pendingManual = false; }
+            pendingSeq = seq;
             ProcessClipboardNow(false);
         }
 
         private void OnRetryTick()
         {
             retryTimer.Stop();
-            if (!monitorEnabled || settingClipboard)
+            if ((!monitorEnabled && !pendingManual) || settingClipboard)
             {
                 retryCount = 0;
                 return;
             }
-            ProcessClipboardNow(false);
+            ProcessClipboardNow(pendingManual);
         }
 
-        private enum ProcessResult { Converted, NothingToDo, Busy }
+        private enum ProcessResult { Converted, NothingToDo, Busy, NotReady, Superseded, Failed }
 
         private void ProcessClipboardNow(bool manual)
         {
+            uint attemptedSeq = GetClipboardSequenceNumber();
+            bool newManualRequest = manual && !pendingManual;
+            if (newManualRequest) { pendingManual = true; retryCount = 0; pendingSeq = GetClipboardSequenceNumber(); }
             ProcessResult result;
             try
             {
                 result = TryProcessClipboard();
             }
+            catch (ExternalException) { result = ProcessResult.Busy; }
             catch (Exception ex)
             {
                 Program.Log("转换", ex);
-                result = ProcessResult.NothingToDo;
+                result = ProcessResult.Failed;
+                lastStatus = "转换失败，请查看错误日志：" + ex.Message;
+                if (manual) trayIcon.ShowBalloonTip(3000, Program.AppTitle, lastStatus, ToolTipIcon.Error);
             }
 
-            if (result == ProcessResult.Busy)
+            if (result == ProcessResult.Busy || result == ProcessResult.NotReady || result == ProcessResult.Superseded)
             {
                 retryCount++;
-                if (manual)
+                lastStatus = "剪贴板暂不可读，正在重试（" + retryCount + "/" + MaxRetries + "）";
+                if (newManualRequest)
                 {
                     trayIcon.ShowBalloonTip(2000, Program.AppTitle,
                         "剪贴板正被其他程序占用，稍后会自动重试。", ToolTipIcon.Warning);
                 }
                 if (retryCount <= MaxRetries) retryTimer.Start();
-                else retryCount = 0;
+                else
+                {
+                    lastStatus = "重试超时，请重新截图或按快捷键重试";
+                    Program.Log("重试超时", new IOException(lastStatus));
+                    if (pendingManual) trayIcon.ShowBalloonTip(3000, Program.AppTitle, lastStatus, ToolTipIcon.Warning);
+                    retryCount = 0; pendingManual = false;
+                }
                 return;
             }
 
             retryTimer.Stop();
             retryCount = 0;
+            pendingManual = false;
+            lastHandledSeq = result == ProcessResult.Converted ? lastSetSeq : attemptedSeq;
             if (manual && result == ProcessResult.NothingToDo)
             {
                 trayIcon.ShowBalloonTip(2000, Program.AppTitle,
@@ -267,13 +314,14 @@ namespace PasteImageToExplorer
         // 返回 Converted 表示完成一次转换；Busy 表示剪贴板被其他程序占用，需要重试
         private ProcessResult TryProcessClipboard()
         {
+            uint inputSeq = GetClipboardSequenceNumber();
             IDataObject data;
             try
             {
                 data = Clipboard.GetDataObject();
             }
             catch (ExternalException) { return ProcessResult.Busy; }
-            if (data == null) return ProcessResult.NothingToDo;
+            if (data == null) return ProcessResult.NotReady;
 
             if (!HasImageFormat(data)) return ProcessResult.NothingToDo;
             // 已是文件复制（例如在资源管理器里复制的图片文件）则无需转换
@@ -288,14 +336,17 @@ namespace PasteImageToExplorer
             {
                 try
                 {
-                    sourceImage = Clipboard.GetImage();
+                    sourceImage = data.GetData(DataFormats.Bitmap) as Image;
                 }
                 catch (ExternalException) { return ProcessResult.Busy; }
-                if (sourceImage == null) return ProcessResult.NothingToDo;
+                if (sourceImage == null) return ProcessResult.NotReady;
                 cacheImage = new Bitmap(sourceImage);
             }
 
             string savedPath = null;
+            Bitmap clipboardImage = null;
+            MemoryStream pngStream = null;
+            bool committed = false;
             try
             {
                 savedPath = SaveImageToCache(pngBytes, cacheImage);
@@ -309,39 +360,49 @@ namespace PasteImageToExplorer
                 {
                     if (pngBytes != null)
                     {
-                        outData.SetData(PngFormat, false, new MemoryStream(pngBytes));
+                        pngStream = new MemoryStream(pngBytes);
+                        outData.SetData(PngFormat, false, pngStream);
                         using (MemoryStream ms = new MemoryStream(pngBytes))
                         using (Image decoded = Image.FromStream(ms))
                         {
-                            outData.SetImage(new Bitmap(decoded));
+                            clipboardImage = new Bitmap(decoded);
+                            outData.SetImage(clipboardImage);
                         }
                     }
                     else
                     {
-                        outData.SetImage(new Bitmap(cacheImage));
+                        clipboardImage = new Bitmap(cacheImage);
+                        outData.SetImage(clipboardImage);
                     }
                 }
 
                 try
                 {
+                    // Don't overwrite a newer clipboard value while encoding/saving the old image.
+                    uint nowSeq = GetClipboardSequenceNumber();
+                    if (inputSeq != 0 && nowSeq != inputSeq) return ProcessResult.Superseded;
                     settingClipboard = true;
                     try
                     {
-                        Clipboard.SetDataObject(outData, true);
+                        // Retry on our timer, not inside OLE (which could overwrite a newer value).
+                        Clipboard.SetDataObject(outData, true, 0, 0);
                     }
                     finally
                     {
                         settingClipboard = false;
                     }
                     lastSetSeq = GetClipboardSequenceNumber();
+                    committed = true;
                 }
                 catch (ExternalException)
                 {
-                    try { File.Delete(savedPath); } catch { }
+                    // OleSetClipboard can succeed before OleFlushClipboard fails. The
+                    // candidate may already be referenced; the finally block checks it.
                     return ProcessResult.Busy;
                 }
 
                 convertedCount++;
+                lastStatus = "已转换：" + Path.GetFileName(savedPath);
                 UpdateTooltip();
                 CleanOldCache();
                 EnforceCacheLimits();
@@ -357,8 +418,18 @@ namespace PasteImageToExplorer
             finally
             {
                 if (sourceImage != null) sourceImage.Dispose();
-                // cacheImage 可能仍被剪贴板数据对象引用，交给 GC 回收
+                if (cacheImage != null) cacheImage.Dispose();
+                if (clipboardImage != null) clipboardImage.Dispose();
+                if (pngStream != null) pngStream.Dispose();
+                if (!committed && savedPath != null) DeleteUncommittedCache(savedPath);
             }
+        }
+
+        private void DeleteUncommittedCache(string path)
+        {
+            HashSet<string> keep = GetProtectedCacheFiles();
+            if (keep == null || keep.Contains(path)) return;
+            try { File.Delete(path); } catch { }
         }
 
         private static bool HasImageFormat(IDataObject data)
@@ -404,8 +475,11 @@ namespace PasteImageToExplorer
                 if (bytes[0] != 0x89 || bytes[1] != 0x50 || bytes[2] != 0x4E || bytes[3] != 0x47) return null;
                 return bytes;
             }
-            catch
+            catch (ExternalException) { throw; }
+            catch (IOException) { throw; }
+            catch (Exception ex)
             {
+                Program.Log("读取 PNG", ex);
                 return null;
             }
         }
@@ -431,12 +505,14 @@ namespace PasteImageToExplorer
         {
             try
             {
+                HashSet<string> keep = GetProtectedCacheFiles();
+                if (keep == null) return; // Can't safely determine current references: defer deletion.
                 DateTime cutoff = DateTime.Now.AddDays(-CacheRetentionDays);
                 foreach (string file in Directory.GetFiles(cacheDir, "*.png"))
                 {
                     try
                     {
-                        if (File.GetLastWriteTime(file) < cutoff) File.Delete(file);
+                        if (!keep.Contains(file) && File.GetLastWriteTime(file) < cutoff) File.Delete(file);
                     }
                     catch { }
                 }
@@ -448,6 +524,8 @@ namespace PasteImageToExplorer
         {
             try
             {
+                HashSet<string> keep = GetProtectedCacheFiles();
+                if (keep == null) return;
                 FileInfo[] files = new DirectoryInfo(cacheDir).GetFiles("*.png");
                 if (files.Length <= MaxCacheFiles) return;
                 Array.Sort(files, delegate(FileInfo a, FileInfo b)
@@ -455,9 +533,10 @@ namespace PasteImageToExplorer
                     return a.LastWriteTimeUtc.CompareTo(b.LastWriteTimeUtc);
                 });
                 int excess = files.Length - MaxCacheFiles;
-                for (int i = 0; i < excess; i++)
+                for (int i = 0; i < files.Length && excess > 0; i++)
                 {
-                    try { files[i].Delete(); } catch { }
+                    if (keep.Contains(files[i].FullName)) continue;
+                    try { files[i].Delete(); excess--; } catch { }
                 }
             }
             catch { }
@@ -468,22 +547,17 @@ namespace PasteImageToExplorer
         {
             try
             {
-                List<string> keepList = null;
-                try
+                HashSet<string> keepList = GetProtectedCacheFiles();
+                if (keepList == null)
                 {
-                    if (Clipboard.ContainsFileDropList())
-                    {
-                        StringCollection drop = Clipboard.GetFileDropList();
-                        keepList = new List<string>();
-                        foreach (string f in drop) keepList.Add(f.ToLowerInvariant());
-                    }
+                    trayIcon.ShowBalloonTip(2000, Program.AppTitle, "剪贴板被占用，为保护当前图片，本次未清理。", ToolTipIcon.Warning);
+                    return;
                 }
-                catch { }
 
                 int deleted = 0;
                 foreach (string file in Directory.GetFiles(cacheDir, "*.png"))
                 {
-                    if (keepList != null && keepList.Contains(file.ToLowerInvariant())) continue;
+                    if (keepList.Contains(file)) continue;
                     try { File.Delete(file); deleted++; }
                     catch { }
                 }
@@ -494,6 +568,24 @@ namespace PasteImageToExplorer
             {
                 Program.Log("清理缓存", ex);
             }
+        }
+
+        private HashSet<string> GetProtectedCacheFiles()
+        {
+            try
+            {
+                HashSet<string> keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                IDataObject data = Clipboard.GetDataObject();
+                if (data == null) return null;
+                if (data.GetDataPresent(DataFormats.FileDrop))
+                {
+                    string[] paths = data.GetData(DataFormats.FileDrop) as string[];
+                    if (paths == null) return null;
+                    foreach (string path in paths) keep.Add(Path.GetFullPath(path));
+                }
+                return keep;
+            }
+            catch { return null; }
         }
 
         // ---------------- 界面 ----------------
@@ -510,6 +602,8 @@ namespace PasteImageToExplorer
                 monitorEnabled = itemMonitor.Checked;
                 SaveSettings();
                 UpdateTooltip();
+                if (monitorEnabled) { lastHandledSeq = 0; ProcessClipboardNow(false); }
+                else if (!pendingManual) { retryTimer.Stop(); retryCount = 0; }
             };
 
             itemKeepImage = new ToolStripMenuItem("转换后在剪贴板保留图像(&K)");
@@ -570,6 +664,9 @@ namespace PasteImageToExplorer
             menu.Items.Add(itemOpenCache);
             menu.Items.Add(itemClean);
             menu.Items.Add(new ToolStripSeparator());
+            ToolStripMenuItem itemSettings = new ToolStripMenuItem("设置：快捷键与转换选项(&O)");
+            itemSettings.Click += delegate { ShowSettings(); };
+            menu.Items.Add(itemSettings);
             menu.Items.Add(itemAbout);
             menu.Items.Add(itemExit);
 
@@ -581,6 +678,154 @@ namespace PasteImageToExplorer
                 itemNotify.Checked = showNotifications;
                 itemAutoStart.Checked = IsAutoStartEnabled();
             };
+        }
+
+        private static bool TryParseHotkey(string text, out uint mods, out uint key, out string normalized)
+        {
+            mods = 0; key = 0; normalized = "";
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string[] parts = text.Split('+');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string part = parts[i].Trim().ToUpperInvariant();
+                uint bit = part == "ALT" ? 1u : part == "CTRL" || part == "CONTROL" ? 2u : part == "SHIFT" ? 4u : part == "WIN" ? 8u : 0u;
+                if (bit != 0)
+                {
+                    if ((mods & bit) != 0) return false;
+                    mods |= bit;
+                }
+                else
+                {
+                    if (key != 0 || i != parts.Length - 1) return false;
+                    if (part.Length == 1 && ((part[0] >= 'A' && part[0] <= 'Z') || (part[0] >= '0' && part[0] <= '9')))
+                        key = (uint)part[0];
+                    else
+                    {
+                        int number;
+                        if (!part.StartsWith("F") || !int.TryParse(part.Substring(1), out number) || number < 1 || number > 24) return false;
+                        key = (uint)((int)Keys.F1 + number - 1);
+                    }
+                }
+            }
+            if (mods == 0 || key == 0) return false;
+            normalized = ((mods & 2) != 0 ? "Ctrl+" : "") + ((mods & 1) != 0 ? "Alt+" : "")
+                + ((mods & 4) != 0 ? "Shift+" : "") + ((mods & 8) != 0 ? "Win+" : "")
+                + (key >= (uint)Keys.F1 && key <= (uint)Keys.F24 ? "F" + (key - (uint)Keys.F1 + 1) : ((char)key).ToString());
+            return true;
+        }
+
+        private bool ApplyHotkey(bool enabled, string text)
+        {
+            uint mods, key; string normalized;
+            if (!enabled)
+            {
+                if (registeredHotkeyId != 0) UnregisterHotKey(listener.Handle, registeredHotkeyId);
+                registeredHotkeyId = 0; hotkeyEnabled = false; hotkeyStatus = "全局快捷键已关闭";
+                if (TryParseHotkey(text, out mods, out key, out normalized)) hotkeyText = normalized;
+                return true;
+            }
+            if (!TryParseHotkey(text, out mods, out key, out normalized))
+            {
+                hotkeyStatus = "格式无效：请使用 Ctrl / Alt / Shift / Win 加字母、数字或 F1–F24";
+                return false;
+            }
+            if (registeredHotkeyId != 0 && hotkeyText == normalized)
+            { hotkeyEnabled = true; hotkeyStatus = "快捷键已生效：" + normalized; return true; }
+            int nextId = registeredHotkeyId == 1 ? 2 : 1;
+            if (!RegisterHotKey(listener.Handle, nextId, mods | 0x4000, key)) // MOD_NOREPEAT
+            {
+                hotkeyStatus = normalized + " 无法注册，可能已被占用或受系统限制（错误 " + Marshal.GetLastWin32Error() + "），原快捷键保持不变";
+                return false;
+            }
+            if (registeredHotkeyId != 0) UnregisterHotKey(listener.Handle, registeredHotkeyId);
+            registeredHotkeyId = nextId; hotkeyEnabled = true; hotkeyText = normalized;
+            hotkeyStatus = "快捷键已生效：" + normalized;
+            return true;
+        }
+
+        private void ShowSettings()
+        {
+            if (settingsForm != null && !settingsForm.IsDisposed) { settingsForm.Activate(); return; }
+            settingsForm = CreateSettingsForm();
+            settingsForm.FormClosed += delegate { settingsForm = null; };
+            settingsForm.Show();
+        }
+
+        private Form CreateSettingsForm()
+        {
+            Form form = new Form();
+            form.Text = Program.AppTitle + " · 设置";
+            form.Font = new Font("Microsoft YaHei UI", 10f);
+            form.AutoScaleMode = AutoScaleMode.Dpi;
+            form.ClientSize = new Size(560, 460);
+            form.FormBorderStyle = FormBorderStyle.FixedDialog;
+            form.MaximizeBox = false; form.MinimizeBox = false;
+            form.StartPosition = FormStartPosition.CenterScreen;
+            Label title = new Label(); title.Text = "截图后，一键粘贴为文件";
+            title.Font = new Font(form.Font.FontFamily, 15f, FontStyle.Bold);
+            title.SetBounds(24, 18, 510, 35); form.Controls.Add(title);
+            CheckBox monitor = new CheckBox(); monitor.Name = "monitor"; monitor.Text = "自动转换新的剪贴板图像";
+            monitor.Checked = monitorEnabled; monitor.SetBounds(26, 65, 500, 28); form.Controls.Add(monitor);
+            CheckBox keep = new CheckBox(); keep.Text = "转换后保留原图像（可继续粘贴到聊天 / 文档）";
+            keep.Checked = keepImageOnClipboard; keep.SetBounds(26, 99, 500, 28); form.Controls.Add(keep);
+            CheckBox notify = new CheckBox(); notify.Text = "转换成功时显示通知";
+            notify.Checked = showNotifications; notify.SetBounds(26, 133, 500, 28); form.Controls.Add(notify);
+            CheckBox startup = new CheckBox(); startup.Text = "登录 Windows 后自动启动";
+            startup.Checked = IsAutoStartEnabled(); startup.SetBounds(26, 167, 500, 28); form.Controls.Add(startup);
+            CheckBox shortcut = new CheckBox(); shortcut.Text = "启用全局快捷键：立即转换（暂停自动转换时也可用）";
+            shortcut.Checked = hotkeyEnabled; shortcut.SetBounds(26, 210, 510, 28); form.Controls.Add(shortcut);
+            TextBox hotkey = new TextBox(); hotkey.Name = "hotkey"; hotkey.Text = hotkeyText;
+            hotkey.SetBounds(28, 247, 215, 30); hotkey.Enabled = shortcut.Checked; form.Controls.Add(hotkey);
+            shortcut.CheckedChanged += delegate { hotkey.Enabled = shortcut.Checked; };
+            hotkey.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.Control && !e.Alt && !e.Shift && (e.KeyCode == Keys.A || e.KeyCode == Keys.C || e.KeyCode == Keys.V || e.KeyCode == Keys.X || e.KeyCode == Keys.Back)) return;
+                if (e.Modifiers == Keys.None || e.KeyCode == Keys.ControlKey || e.KeyCode == Keys.ShiftKey || e.KeyCode == Keys.Menu) return;
+                string keyName = e.KeyCode >= Keys.D0 && e.KeyCode <= Keys.D9 ? ((char)('0' + e.KeyCode - Keys.D0)).ToString() : e.KeyCode.ToString();
+                hotkey.Text = (e.Control ? "Ctrl+" : "") + (e.Alt ? "Alt+" : "") + (e.Shift ? "Shift+" : "") + keyName;
+                e.SuppressKeyPress = true;
+            };
+            Label hint = new Label(); hint.Text = "直接按组合键，或输入 Alt+C / Ctrl+Shift+F8\nWin 组合键请手动输入";
+            hint.SetBounds(257, 245, 280, 46); form.Controls.Add(hint);
+            Label status = new Label(); status.Text = hotkeyStatus + "\n" + lastStatus;
+            status.SetBounds(26, 300, 510, 60); form.Controls.Add(status);
+            Button cache = new Button(); cache.Text = "打开缓存"; cache.SetBounds(26, 371, 108, 32);
+            cache.Click += delegate { OpenCacheFolder(); }; form.Controls.Add(cache);
+            Button log = new Button(); log.Text = "查看日志"; log.SetBounds(145, 371, 108, 32);
+            log.Click += delegate
+            {
+                string path = Path.Combine(Path.GetDirectoryName(settingsFile), "error.log");
+                if (File.Exists(path)) System.Diagnostics.Process.Start("notepad.exe", "\"" + path + "\"");
+                else status.Text = "尚无错误日志。\n" + lastStatus;
+            }; form.Controls.Add(log);
+            Button save = new Button(); save.Text = "保存"; save.SetBounds(308, 409, 108, 32); form.Controls.Add(save);
+            Button cancel = new Button(); cancel.Text = "取消"; cancel.SetBounds(427, 409, 108, 32); form.Controls.Add(cancel);
+            cancel.Click += delegate { form.Close(); }; form.CancelButton = cancel; form.AcceptButton = save;
+            save.Click += delegate
+            {
+                bool oldEnabled = hotkeyEnabled; string oldKey = hotkeyText;
+                bool oldMonitor = monitorEnabled, oldKeep = keepImageOnClipboard, oldNotify = showNotifications;
+                bool oldStartup = IsAutoStartEnabled();
+                if (!ApplyHotkey(shortcut.Checked, hotkey.Text)) { status.ForeColor = Color.Firebrick; status.Text = hotkeyStatus; return; }
+                try
+                {
+                    if (startup.Checked != oldStartup) SetAutoStart(startup.Checked);
+                    monitorEnabled = monitor.Checked; keepImageOnClipboard = keep.Checked; showNotifications = notify.Checked;
+                    if (!SaveSettings()) throw new IOException("设置文件写入失败");
+                }
+                catch (Exception ex)
+                {
+                    monitorEnabled = oldMonitor; keepImageOnClipboard = oldKeep; showNotifications = oldNotify;
+                    ApplyHotkey(oldEnabled, oldKey);
+                    try { if (IsAutoStartEnabled() != oldStartup) SetAutoStart(oldStartup); } catch (Exception restore) { Program.Log("恢复自启动", restore); }
+                    Program.Log("保存设置", ex); status.ForeColor = Color.Firebrick; status.Text = "未保存：" + ex.Message; return;
+                }
+                itemMonitor.Checked = monitorEnabled; itemKeepImage.Checked = keepImageOnClipboard; itemNotify.Checked = showNotifications;
+                UpdateTooltip(); form.Close();
+                if (monitorEnabled) { lastHandledSeq = 0; ProcessClipboardNow(false); }
+                else if (!pendingManual) { retryTimer.Stop(); retryCount = 0; }
+            };
+            return form;
         }
 
         private void BuildTrayIcon(bool firstRun)
@@ -634,8 +879,9 @@ namespace PasteImageToExplorer
         private void ShowAbout()
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine(Program.AppTitle + " v1.0");
+            sb.AppendLine(Program.AppTitle + " v1.1");
             sb.AppendLine("作者：LHStudio");
+            sb.AppendLine("全局快捷键：" + (hotkeyEnabled && registeredHotkeyId != 0 ? hotkeyText : "未启用"));
             sb.AppendLine();
             sb.AppendLine("截图或复制图片后，自动把图像保存为 PNG 文件并放回剪贴板：");
             sb.AppendLine("  · 在资源管理器 / 桌面按 Ctrl+V，直接粘贴为图片文件");
@@ -678,23 +924,35 @@ namespace PasteImageToExplorer
                     if (key == "monitor") monitorEnabled = (val == "1");
                     else if (key == "keep_image") keepImageOnClipboard = (val == "1");
                     else if (key == "notify") showNotifications = (val == "1");
+                    else if (key == "hotkey_enabled") hotkeyEnabled = (val == "1");
+                    else if (key == "hotkey")
+                    {
+                        uint mods, code; string normalized;
+                        if (TryParseHotkey(val, out mods, out code, out normalized)) hotkeyText = normalized;
+                    }
                 }
             }
             catch { }
         }
 
-        private void SaveSettings()
+        private bool SaveSettings()
         {
             try
             {
-                File.WriteAllLines(settingsFile, new string[]
+                string temporary = settingsFile + ".tmp";
+                File.WriteAllLines(temporary, new string[]
                 {
                     "monitor=" + (monitorEnabled ? 1 : 0),
                     "keep_image=" + (keepImageOnClipboard ? 1 : 0),
-                    "notify=" + (showNotifications ? 1 : 0)
+                    "notify=" + (showNotifications ? 1 : 0),
+                    "hotkey_enabled=" + (hotkeyEnabled ? 1 : 0),
+                    "hotkey=" + hotkeyText
                 }, Encoding.UTF8);
+                if (File.Exists(settingsFile)) File.Replace(temporary, settingsFile, null);
+                else File.Move(temporary, settingsFile);
+                return true;
             }
-            catch { }
+            catch (Exception ex) { Program.Log("保存设置", ex); return false; }
         }
 
         private static bool IsAutoStartEnabled()
@@ -731,6 +989,8 @@ namespace PasteImageToExplorer
         {
             if (disposed) return;
             disposed = true;
+            if (settingsForm != null) { settingsForm.Dispose(); settingsForm = null; }
+            if (listener != null && registeredHotkeyId != 0) UnregisterHotKey(listener.Handle, registeredHotkeyId);
             if (retryTimer != null) { retryTimer.Dispose(); retryTimer = null; }
             if (cleanupTimer != null) { cleanupTimer.Dispose(); cleanupTimer = null; }
             if (pollTimer != null) { pollTimer.Dispose(); pollTimer = null; }
@@ -743,6 +1003,7 @@ namespace PasteImageToExplorer
             if (menu != null) { menu.Dispose(); menu = null; }
             if (listener != null)
             {
+                try { RemoveClipboardFormatListener(listener.Handle); } catch { }
                 try { listener.DestroyHandle(); } catch { }
                 listener = null;
             }

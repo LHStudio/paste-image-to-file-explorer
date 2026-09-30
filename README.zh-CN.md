@@ -1,4 +1,8 @@
-﻿# Paste Image to File Explorer
+# v1.1 更新
+
+默认 Alt+C 手动转换，可在托盘「设置」自定义；自动转换重试、漏通知兜底和缓存保护已改进。详见 [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md)。
+
+# Paste Image to File Explorer
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](https://www.microsoft.com/windows)
